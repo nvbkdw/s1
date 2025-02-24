@@ -2,7 +2,8 @@
     "transformer_layer_cls_to_wrap": "Qwen2DecoderLayer",
     "cpu_ram_efficient_loading": true,
     "use_orig_params": true,
-    "activation_checkpointing": true,
-    "sharding_strategy": "FULL_SHARD",
-    "state_dict_type": "SHARDED_STATE_DICT"
+    "gradient_accumulation_steps": 2,
+    "zero3_init_flag": true,
+    "zero3_save_16bit_model": true,
+    "zero_stage": 3
 }
