@@ -32,6 +32,7 @@ class TrainingConfig:
 
 def llm_train(config, args=None):
     import torch
+    import torch.nn as nn
     import torch.distributed as dist
     from datasets import load_dataset, concatenate_datasets, DatasetDict
     import transformers
@@ -41,6 +42,7 @@ def llm_train(config, args=None):
     )
     import trl
     from pytorch_memlab import MemReporter
+    from torch.profiler import profile, schedule, tensorboard_trace_handler
     
     args_dict = asdict(args)
     training_args_dict = {}
@@ -102,19 +104,59 @@ def llm_train(config, args=None):
     # training_args.local_rank = local_rank
     # reporter = MemReporter(model)
     # reporter.report()
+    
+    tracing_schedule = schedule(skip_first=5, wait=5, warmup=2, active=2, repeat=1)
+    trace_handler = tensorboard_trace_handler(dir_name='/mnt/workspace/ryan/trace', use_gzip=True)
+    from torch.profiler import ProfilerActivity
+    from accelerate import ProfileKwargs
+    
     logging.info("Distributed mode: ", args.distributed_state, args.parallel_mode)
-    trainer = trl.SFTTrainer(
+    
+    
+    # define custom trainer
+    class ProfilerTrainer(trl.SFTTrainer):
+        
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.profiler = profile(
+                activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                schedule=torch.profiler.schedule(
+                    wait=0, warmup=0, active=2,
+                ),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(dir_name='/mnt/workspace/ryan/trace', use_gzip=True),
+                record_shapes=True,
+                profile_memory=True,
+                with_flops=True,
+                with_stack=True
+            )
+
+        def training_step(
+            self, model, inputs, num_items_in_batch=None
+        ) -> torch.Tensor:
+            with self.profiler as prof:
+                loss = super().training_step(model, inputs)
+                prof.step()
+            return loss
+
+        def on_train_end(self):
+            self.profiler.stop()
+            print(self.profiler.key_averages().table(sort_by="self_cuda_time_total", row_limit=10))
+            super().on_train_end()
+        
+        
+    trainer = ProfilerTrainer(
         model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator
     )
+    
     # [2] Report Metrics and Checkpoints to Ray Train
     # ===============================================
     # callback = RayTrainReportCallback()
     # trainer.add_callback(callback)
-    
+
     # [3] Prepare Transformers Trainer
     # ================================
     trainer = prepare_trainer(trainer)
@@ -125,7 +167,7 @@ def llm_train(config, args=None):
 
     dist.barrier()
     logging.info("Distributed training completed.")
-
+        
     # trainer.save_model(output_dir=training_args.output_dir)
     # tokenizer.save_pretrained(training_args.output_dir)
     trainer.accelerator.wait_for_everyone()
